@@ -54,12 +54,35 @@ fi
 
 ensure_memory_dir
 
+# Extract session ID early (needed for buffer file lookup)
+SESSION_ID=$(basename "$TRANSCRIPT_PATH" .jsonl)
+BUFFER_FILE="$MEMSEARCH_DIR/.session-buffer-${SESSION_ID}.md"
+
 # Parse transcript — extract the last turn only (one user question + all responses)
 PARSED=$("$SCRIPT_DIR/parse-transcript.sh" "$TRANSCRIPT_PATH" 2>/dev/null || true)
 
-if [ -z "$PARSED" ] || [ "$PARSED" = "(empty transcript)" ] || [ "$PARSED" = "(no user message found)" ] || [ "$PARSED" = "(empty turn)" ]; then
+# Check for accumulated session buffer (from UserPromptSubmit hooks)
+BUFFER_CONTENT=""
+if [ -f "$BUFFER_FILE" ]; then
+  BUFFER_CONTENT=$(cat "$BUFFER_FILE" 2>/dev/null || true)
+fi
+
+# If both buffer and parsed are empty, nothing to summarize
+if [ -z "$BUFFER_CONTENT" ] && { [ -z "$PARSED" ] || [ "$PARSED" = "(empty transcript)" ] || [ "$PARSED" = "(no user message found)" ] || [ "$PARSED" = "(empty turn)" ]; }; then
   echo '{}'
   exit 0
+fi
+
+# Combine buffer (accumulated turns) with last turn for comprehensive summary
+FULL_CONTENT=""
+if [ -n "$BUFFER_CONTENT" ]; then
+  FULL_CONTENT="=== Accumulated session activity ===
+$BUFFER_CONTENT
+
+"
+fi
+if [ -n "$PARSED" ] && [ "$PARSED" != "(empty transcript)" ] && [ "$PARSED" != "(no user message found)" ] && [ "$PARSED" != "(empty turn)" ]; then
+  FULL_CONTENT+="$PARSED"
 fi
 
 # Determine today's date and current time
@@ -67,8 +90,7 @@ TODAY=$(date +%Y-%m-%d)
 NOW=$(date +%H:%M)
 MEMORY_FILE="$MEMORY_DIR/$TODAY.md"
 
-# Extract session ID and last user turn UUID for progressive disclosure anchors
-SESSION_ID=$(basename "$TRANSCRIPT_PATH" .jsonl)
+# Extract last user turn UUID for progressive disclosure anchors
 LAST_USER_TURN_UUID=$(python3 -c "
 import json, sys
 uuid = ''
@@ -96,12 +118,12 @@ else
   SYSTEM_PROMPT="You are a third-person note-taker. Summarize the transcript as 2-6 bullet points. Write in third person. Output ONLY bullet points."
 fi
 
-# Summarize the last turn into structured bullet points.
+# Summarize the full session (accumulated turns + last turn) into structured bullet points.
 # Default: use claude -p (plugin's own agent). If [llm] is configured, still
 # use claude -p since it's the most reliable path for Claude Code plugin.
 SUMMARY=""
 if command -v claude &>/dev/null; then
-  SUMMARY=$(printf '%s' "$PARSED" | MEMSEARCH_NO_WATCH=1 CLAUDECODE= claude -p \
+  SUMMARY=$(printf '%s' "$FULL_CONTENT" | MEMSEARCH_NO_WATCH=1 CLAUDECODE= claude -p \
     --model haiku \
     --no-session-persistence \
     --no-chrome \
@@ -109,9 +131,9 @@ if command -v claude &>/dev/null; then
     2>/dev/null || true)
 fi
 
-# If claude is not available or returned empty, fall back to raw parsed output
+# If claude is not available or returned empty, fall back to raw content
 if [ -z "$SUMMARY" ]; then
-  SUMMARY="$PARSED"
+  SUMMARY="$FULL_CONTENT"
 fi
 
 # Append as a sub-heading under the session heading written by SessionStart
@@ -124,6 +146,11 @@ fi
   echo "$SUMMARY"
   echo ""
 } >> "$MEMORY_FILE"
+
+# Clean up session buffer after successful consolidation
+if [ -f "$BUFFER_FILE" ]; then
+  rm -f "$BUFFER_FILE"
+fi
 
 # Kill any previous background index before re-indexing to avoid process accumulation
 kill_orphaned_index
