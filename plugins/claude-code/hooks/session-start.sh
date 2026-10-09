@@ -151,27 +151,16 @@ fi
 
 context=""
 
-# Find the 2 most recent daily log files (sorted by filename descending)
-recent_files=$(ls -1 "$MEMORY_DIR"/*.md 2>/dev/null | sort -r | head -2)
-
-if [ -n "$recent_files" ]; then
-  context="# Recent Memory\n\n"
-  for f in $recent_files; do
-    basename_f=$(basename "$f")
-    # Extract headings (## Session, ### turn timestamps) and bullet content —
-    # higher signal density than a raw tail, so Claude can see the structure
-    # of past days (what sessions existed, what topics came up) rather than
-    # just the last 30 lines of whichever file happened to be newest.
-    content=$(grep -E '^(#{2,4} |- )' "$f" 2>/dev/null | head -40 || true)
-    if [ -n "$content" ]; then
-      context+="## $basename_f\n$content\n\n"
-    fi
-  done
+# A one-line recall hint, as the Codex plugin gives, instead of injecting daily notes: the injected
+# excerpt was the oldest part of the last two days, mixed in other agents' notes, and cost
+# 800-1,800 words per start, while agents that get the hint search the memory-recall skill on demand.
+memory_files=$(ls -1 "$MEMORY_DIR"/*.md 2>/dev/null | sort)
+memory_count=$(printf '%s\n' "$memory_files" | grep -c .)
+if [ "$memory_count" -gt 0 ]; then
+  oldest=$(basename "$(printf '%s\n' "$memory_files" | head -1)" .md)
+  newest=$(basename "$(printf '%s\n' "$memory_files" | tail -1)" .md)
+  context="You have ${memory_count} past memory file(s) (${oldest} to ${newest}). Use the memory-recall skill to search when the user's question could benefit from historical context."
 fi
-
-# Note: Detailed memory search is handled by the memory-recall skill (pull-based).
-# The cold-start context above gives Claude enough awareness of recent sessions
-# to decide when to invoke the skill for deeper recall.
 
 if [ -n "$context" ]; then
   json_context=$(_json_encode_str "$context")
